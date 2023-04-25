@@ -90,3 +90,20 @@ def plot_polygons(gdf):
     ax.set_ylim([ymin, ymax])
     # Save the figure as a PNG file
     fig.savefig('itcs.png', dpi=300, bbox_inches='tight')
+
+
+from deepforest import main
+from deepforest import get_data
+import os
+import matplotlib.pyplot as plt
+
+# create a function to extract deepforest boxes from rgb images
+def extract_boxes(rgb_path):
+    model = main.deepforest()
+    model.use_release()
+    boxes = model.predict_tile(raster_path=rgb_path, return_plot=False)
+    return boxes
+
+
+
+

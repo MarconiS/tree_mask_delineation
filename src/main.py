@@ -5,7 +5,7 @@ from rasterio.mask import mask
 import laspy
 
 
-from field_data_alignment.src.utils import *
+from src.utils import *
 
 forestGEO_gdf = gpd.read_file('~/Documents/GitHub/GEOtreehealth/field_data_alignment/indir/test_noisy.shp')
 field_gdf = gpd.read_file('~/Documents/GitHub/GEOtreehealth/field_data_alignment/indir/data_field.shp')
@@ -24,3 +24,11 @@ forestGEO_features = extract_features(forestGEO_gdf, hsi, rgb, lidar_path)
 field_features = extract_features(field_gdf, hsi, rgb, lidar_path)
 aligned_gdf = align_data(forestGEO_gdf, field_gdf, forestGEO_features, field_features, threshold=0.1)
 aligned_gdf.to_file('~/Documents/GitHub/GEOtreehealth/field_data_alignment/outdir/aligned_data.shp')
+
+
+
+
+
+
+
+
