@@ -5,6 +5,7 @@ import laspy, laszip
 import json
 from sklearn.metrics.pairwise import euclidean_distances
 from matplotlib import pyplot as plt
+import os
 def extract_features(gdf, hsi, rgb, lidar_path):
     features = []
 
@@ -92,18 +93,36 @@ def plot_polygons(gdf):
     fig.savefig('itcs.png', dpi=300, bbox_inches='tight')
 
 
-from deepforest import main
-from deepforest import get_data
-import os
-import matplotlib.pyplot as plt
 
 # create a function to extract deepforest boxes from rgb images
 def extract_boxes(rgb_path):
+
+    from deepforest import main
     model = main.deepforest()
     model.use_release()
     boxes = model.predict_tile(raster_path=rgb_path, return_plot=False)
     return boxes
 
+# create a function that loops through all gpkg in a folder, turn them into a geodataframe, and append them together in a single geodataframe
 
+import os
+import geopandas as gpd
+import pandas as pd
 
+def gpkg_to_gdf(folder_path):
+    #create an empty list to store the GeoDataFrames
+    gdfs = []
+    
+    #loop through all the gpkg in the folder
+    for file in os.listdir(folder_path):
+        if file.endswith(".gpkg"):
+            #read the gpkg as a geodataframe
+            temp_gdf = gpd.read_file(os.path.join(folder_path, file))
+            #append the geodataframe to the list
+            gdfs.append(temp_gdf)
+    
+    #concatenate all the geodataframes in the list
+    gdf = pd.concat(gdfs, ignore_index=True)
+    
+    return gdf
 

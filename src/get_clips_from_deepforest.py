@@ -28,16 +28,17 @@ bbox = extract_boxes(file)
 
 
 #use only points whose crwnpst is greater than 2
-itcs = itcs[itcs['Crwnpst'] > 2]
+itcs = itcs[itcs['Crwnpst'] > 1]
 image_file = os.path.join(folder, file)
 # Split the image into batches of 40x40m
-batch_size = 40
-raster_batches, raster_hsi_batches, itcs_batches, itcs_boxes, affine = 
-    split_image(image_file,hsi_img, itcs, bbox, batch_size=batch_size)
+batch_size = 800
+#image_file, hsi_img, itcs, bbox,  batch_size=40
+raster_batches, raster_hsi_batches, itcs_batches, itcs_boxes, affine = split_image(image_file, 
+                            hsi_img, itcs, bbox, batch_size)
 
 
 # Make predictions of tree crown polygons using SAM
-for(i, batch) in enumerate(raster_batches):
+for(i, batch) in enumerate(raster_hsi_batches):
     #skip empty batches
     if itcs_batches[i].shape[0] == 0: 
         continue
