@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 folder = '.'
 file = 'imagery/rgb_clip.tif'
 tree_tops = 'indir/test_noisy.shp'
-
+hsi_img  = 'imagery/hsi_clip.tif'
 # Loop through the files in the folder
 #for file in os.listdir(folder):
 # check if the tree_tops file exists. if not, launch get_tree_tops
@@ -31,7 +31,9 @@ bbox = extract_boxes(file)
 itcs = itcs[itcs['Crwnpst'] > 2]
 image_file = os.path.join(folder, file)
 # Split the image into batches of 40x40m
-raster_batches, itcs_batches, itcs_boxes, affine = split_image(image_file, itcs, bbox, batch_size=40, resolution =0.1)
+batch_size = 40
+raster_batches, raster_hsi_batches, itcs_batches, itcs_boxes, affine = 
+    split_image(image_file,hsi_img, itcs, bbox, batch_size=batch_size)
 
 
 # Make predictions of tree crown polygons using SAM
@@ -46,6 +48,7 @@ for(i, batch) in enumerate(raster_batches):
                                             point_type = "euclidian") 
     # Apply the translation to the geometries in the GeoDataFrame
     x_offset, y_offset = affine[i][2], affine[i][5]
+    y_offset = y_offset - batch_size
     #from a geopandas, remove all rows with a None geometry
     predictions = predictions[predictions['geometry'].notna()]
     predictions["geometry"] = predictions["geometry"].apply(lambda geom: translate(geom, x_offset, y_offset))
@@ -54,8 +57,8 @@ for(i, batch) in enumerate(raster_batches):
     # Save the predictions as geopandas
     predictions.to_file(f'{folder}/outdir/itcs/itcs_{i}.gpkg', driver='GPKG')
 
-    array = raster_batches[5][:3,:,:]
-    batch = np.moveaxis(array, 0, -1)
+    batch = batch[:3,:,:]
+    batch = np.moveaxis(batch, 0, -1)
     imageio.imwrite(f'{folder}/outdir/clips/itcs_{i}.png', batch)
 
 

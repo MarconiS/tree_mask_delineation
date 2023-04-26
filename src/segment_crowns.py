@@ -38,6 +38,7 @@ from segment_anything import sam_model_registry, SamPredictor
 import geopandas as gpd
 import pandas as pd
 from skimage.transform import resize
+from skimage.measure import label
 
 def mask_to_polygons(mask, individual_point):
     # Find contours in the mask
@@ -69,7 +70,6 @@ def mask_to_polygons(mask, individual_point):
         # Choose the largest polygon based on its area
         largest_polygon = max(containing_polygons, key=lambda p: p.area)
     #calculate the area of the polygon
-    #area = [polygon.area for polygon in containing_polygons]
     # If there are no containing polygons, return None
     if not containing_polygons:
         return None
@@ -78,10 +78,46 @@ def mask_to_polygons(mask, individual_point):
     #largest_polygon = max(containing_polygons, key=lambda p: p.area)
     return largest_polygon
 
+
+def mask_to_delineation(mask):
+    labeled_mask = label(mask, connectivity=1)
+    #labeled_mask = labeled_mask.astype(np.uint16)
+    # Create a dictionary with as many values as unique values in the labeled mask
+    label_to_category = {label: category for label, category in zip(np.unique(labeled_mask), range(0, np.unique(labeled_mask).shape[0]))}
+
+    category_mask = np.vectorize(label_to_category.get)(labeled_mask)
+    
+    # Turn each category into a polygon
+    polygons = []
+    
+    for category in np.unique(category_mask):
+        if category == 0:  # Skip the background
+            continue
+
+        # Create a binary mask for the current category
+        binary_mask = (category_mask == category).astype(np.uint8)
+        # Convert binary_mask to 8-bit single-channel image
+        binary_mask = (binary_mask * 255).astype(np.uint8)
+        # Find contours of the binary mask
+        contours, _ = cv2.findContours(binary_mask[0,:,:], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        #skip if does not have enough dimensions
+        if contours[0].shape[0] < 3:
+            continue
+        # Convert the contours to polygons
+        for contour in contours:
+            # Simplify the contour to a polygon
+            poly = Polygon(shell=contour.squeeze())
+            polygons.append(poly)
+
+    return polygons
+
+
+
 # Define a function to make predictions of tree crown polygons using SAM
 def predict_tree_crowns(batch, input_points, neighbors = 10, 
                         input_boxes = None, point_type='random', 
-                        onnx_model_path = None,  rescale_to = None):
+                        onnx_model_path = None,  rescale_to = None, mode = 'bbox'):
 
 
     batch = np.moveaxis(batch, 0, -1)
@@ -91,48 +127,6 @@ def predict_tree_crowns(batch, input_points, neighbors = 10,
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
-
-    if onnx_model_path is None:
-        onnx_model_path = "indir/sam_onnx_example.onnx"
-        onnx_model = SamOnnxModel(sam, return_single_mask=True)
-        dynamic_axes = {
-            "point_coords": {1: "num_points"},
-            "point_labels": {1: "num_points"},
-        }
-        embed_dim = sam.prompt_encoder.embed_dim
-        embed_size = sam.prompt_encoder.image_embedding_size
-        mask_input_size = [4 * x for x in embed_size]
-        dummy_inputs = {
-            "image_embeddings": torch.randn(1, embed_dim, *embed_size, dtype=torch.float),
-            "point_coords": torch.randint(low=0, high=1024, size=(1, 5, 2), dtype=torch.float),
-            "point_labels": torch.randint(low=0, high=4, size=(1, 5), dtype=torch.float),
-            "mask_input": torch.randn(1, 1, *mask_input_size, dtype=torch.float),
-            "has_mask_input": torch.tensor([1], dtype=torch.float),
-            "orig_im_size": torch.tensor([1500, 2250], dtype=torch.float),
-        }
-
-        # Move all tensors in dummy_inputs to the device
-        for key in dummy_inputs:
-            dummy_inputs[key] = dummy_inputs[key]
-
-        output_names = ["masks", "iou_predictions", "low_res_masks"]
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
-            warnings.filterwarnings("ignore", category=UserWarning)
-            with open(onnx_model_path, "wb") as f:
-                torch.onnx.export(
-                    onnx_model,
-                    tuple(dummy_inputs.values()),
-                    f,
-                    export_params=True,
-                    verbose=False,
-                    opset_version=17,
-                    do_constant_folding=True,
-                    input_names=list(dummy_inputs.keys()),
-                    output_names=output_names,
-                    dynamic_axes=dynamic_axes,
-                )    
-        ort_session = onnxruntime.InferenceSession(onnx_model_path)
 
     #neighbors must be the minimum between the total number of input_points and the argument neighbors
     neighbors = min(input_points.shape[0]-2, neighbors)
@@ -145,8 +139,6 @@ def predict_tree_crowns(batch, input_points, neighbors = 10,
     # linstretch the image, normalize it to 0, 255 and convert to int8
     batch = np.uint8(255 * (batch - batch.min()) / (batch.max() - batch.min()))
     sam.to(device=device)
-
-
     predictor = SamPredictor(sam)
     #flip rasterio to be h,w, channels
     predictor.set_image(batch)
@@ -160,114 +152,62 @@ def predict_tree_crowns(batch, input_points, neighbors = 10,
     crown_mask = pd.DataFrame(columns=["geometry", "score"])
     crown_scores=[]
     crown_logits=[]
-    #loop through each stem point, make a prediction, and save the prediction
-    for it in range(0, input_point.shape[0]):
-        #update input_label to be 0 everywhere except at position it       
-        input_label = np.zeros(input_point.shape[0])
-        input_label[it] = 1
-        target_itc = input_point[it]
-        # subset the input_points to be the current point and the 10 closest points
-        # Calculate the Euclidean distance between the ith row and the other rows
-        distances = np.linalg.norm(input_point - input_point[it], axis=1)
-        if point_type == "euclidian":
-        # Find the indices of the 10 closest rows
-            closest_indices = np.argpartition(distances, neighbors+1)[:neighbors+1]  # We use 11 because the row itself is included
-        elif point_type == "random":
-            closest_indices = np.random.choice(np.arange(0, input_point.shape[0]), neighbors+1, replace=True)
-        # Subset the array to the ith row and the 10 closest rows
-        subset_point = input_point[closest_indices]
-        subset_label = input_label[closest_indices]
-        subset_label = subset_label.astype(np.int8)
 
-        #Add a batch index, concatenate a padding point, and transform.
-        if onnx_model_path is not None:
-            onnx_coord = np.concatenate([subset_point, np.array([[0.0, 0.0]])], axis=0)[None, :, :]
-            onnx_label = np.concatenate([subset_label, np.array([-1])], axis=0)[None, :].astype(np.float32)
-            onnx_coord = predictor.transform.apply_coords(onnx_coord, batch.shape[:2]).astype(np.float32)
-            onnx_mask_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
-            onnx_has_mask_input = np.zeros(1, dtype=np.float32)
-            ort_inputs = {
-                "image_embeddings": image_embedding,
-                "point_coords": onnx_coord,
-                "point_labels": onnx_label,
-                "mask_input": onnx_mask_input,
-                "has_mask_input": onnx_has_mask_input,
-                "orig_im_size": np.array(batch.shape[:2], dtype=np.float32)
-            }
-            masks, scores, logits = ort_session.run(None, ort_inputs)
-            masks = masks > predictor.model.mask_threshold
-            masks = masks[0, :, :, :]
+    if input_boxes is not None and mode is 'bbox':# and onnx_model_path is None:
+        #transform the boxes into a torch.tensor
+        input_boxes = torch.tensor(input_boxes, device=predictor.device)
+        transformed_boxes = predictor.transform.apply_boxes_torch(input_boxes, batch.shape[:2])
+        masks,scores, logits = predictor.predict_torch(
+            point_coords=None,
+            point_labels=None,
+            boxes=transformed_boxes,
+            multimask_output=False,
+        )
+        # loop through the masks, polygonize their raster, and append them into a geopandas dataframe
+        for it in range(masks.shape[0]):
+            #pick the mask with the highest score
+            mask = masks[it].to("cpu").numpy()
+            # Find the indices of the True values
+            true_indices = np.argwhere(mask)
+            #skip empty masks
+            if true_indices.shape[0] < 3:
+                continue
+            # Calculate the convex hull
+            polygons = mask_to_delineation(mask)
+            #likewise, if polygon is empty, skip
+            if len(polygons) == 0:
+                continue    
 
+            # Create a GeoDataFrame and append the polygon
+            gdf_temp = gpd.GeoDataFrame(geometry=[polygons[0]], columns=["geometry"])
+            gdf_temp["score"] = scores.to("cpu").numpy()[0][0]
+            gdf_temp["point_id"] = it
 
-        if input_boxes is 9999:
-            subset_box = input_boxes[it]
-            #select point whose x and y are within the box
-            subset_point = subset_point[(subset_point[:,0] > subset_box[0]) & 
-                (subset_point[:,0] < subset_box[2]) & (subset_point[:,1] > subset_box[1]) & 
-                (subset_point[:,1] < subset_box[3])]     
-            #if input_point is empty, pick the center of the box
-            if subset_point.shape[0] == 0:
-                subset_point = np.array([[subset_box[0] + (subset_box[2] - subset_box[0])/2, subset_box[1] + 
-                                          (subset_box[3] - subset_box[1])/2]])
-                
-            if onnx_model_path is not None:
-                #add the box coordinates to the subset_point
-                onnx_box_coords = subset_box.reshape(2, 2)
-                onnx_box_labels = np.array([2,3])
-                onnx_coord = np.concatenate([input_point, onnx_box_coords], axis=0)[None, :, :]
-                onnx_label = np.concatenate([input_label, onnx_box_labels], axis=0)[None, :].astype(np.float32)
+            # Append the temporary GeoDataFrame to the main GeoDataFrame
+            crown_mask = pd.concat([crown_mask, gdf_temp], ignore_index=True)
+            crown_scores.append(scores)
+            crown_logits.append(logits)
 
-                onnx_coord = predictor.transform.apply_coords(onnx_coord, batch.shape[:2]).astype(np.float32)
-                onnx_mask_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
-                onnx_has_mask_input = np.zeros(1, dtype=np.float32)
+    if input_boxes is None or mode is 'only_points':# and onnx_model_path is None:
+        #loop through each stem point, make a prediction, and save the prediction
+        for it in range(0, input_point.shape[0]):
+            #update input_label to be 0 everywhere except at position it       
+            input_label = np.zeros(input_point.shape[0])
+            input_label[it] = 1
+            target_itc = input_point[it]
+            # subset the input_points to be the current point and the 10 closest points
+            # Calculate the Euclidean distance between the ith row and the other rows
+            distances = np.linalg.norm(input_point - input_point[it], axis=1)
+            if point_type == "euclidian":
+            # Find the indices of the 10 closest rows
+                closest_indices = np.argpartition(distances, neighbors+1)[:neighbors+1]  # We use 11 because the row itself is included
+            elif point_type == "random":
+                closest_indices = np.random.choice(np.arange(0, input_point.shape[0]), neighbors+1, replace=True)
+            # Subset the array to the ith row and the 10 closest rows
+            subset_point = input_point[closest_indices]
+            subset_label = input_label[closest_indices]
+            subset_label = subset_label.astype(np.int8)
 
-                ort_inputs = {
-                    "image_embeddings": image_embedding,
-                    "point_coords": onnx_coord,
-                    "point_labels": onnx_label,
-                    "mask_input": onnx_mask_input,
-                    "has_mask_input": onnx_has_mask_input,
-                    "orig_im_size": np.array(batch.shape[:2], dtype=np.float32)
-                }
-
-                masks,scores, logits = ort_session.run(None, ort_inputs)
-                masks = masks > predictor.model.mask_threshold
-                masks = masks[0, :, :, :]
-
-        if onnx_model_path is None and input_boxes is not None:# and onnx_model_path is None:
-           #transform the boxes into a torch.tensor
-            input_boxes = torch.tensor(input_boxes, device=predictor.device)
-            transformed_boxes = predictor.transform.apply_boxes_torch(input_boxes, batch.shape[:2])
-            masks, _, _ = predictor.predict_torch(
-                point_coords=None,
-                point_labels=None,
-                boxes=transformed_boxes,
-                multimask_output=False,
-            )
-            # loop through the masks, polygonize their raster, and append them into a geopandas dataframe
-            for i in range(masks.shape[0]):
-                #pick the mask with the highest score
-                mask = masks[i].to("cpu").numpy()
-                # Find the indices of the True values
-                true_indices = np.argwhere(mask)
-                #skip empty masks
-                if true_indices.shape[0] < 3:
-                    continue
-                # Calculate the convex hull
-                individual_point = Point(input_point[it])
-                polygons = mask_to_polygons(mask, individual_point=None)
-
-                # Create a GeoDataFrame and append the polygon
-                gdf_temp = gpd.GeoDataFrame(geometry=[polygons], columns=["geometry"])
-                gdf_temp["score"] = scores[i]
-                gdf_temp["stemTag"] = subset_label[i]
-                gdf_temp["point_id"] = it
-                gdf_temp["point_x"] = input_point[it][0]
-                gdf_temp["point_y"] = input_point[it][1]
-                gdf = gdf.append(gdf_temp, ignore_index=True)
-
-
-        if onnx_model_path is None and input_boxes is None:
             masks, scores, logits = predictor.predict(
                 point_coords=subset_point,
                 point_labels=subset_label,
@@ -291,10 +231,10 @@ def predict_tree_crowns(batch, input_points, neighbors = 10,
             gdf_temp["score"] = scores
             gdf_temp["stemTag"] = input_crowns.iloc[it]
 
-        # Append the temporary GeoDataFrame to the main GeoDataFrame
-        crown_mask = pd.concat([crown_mask, gdf_temp], ignore_index=True)
-        crown_scores.append(scores)
-        crown_logits.append(logits)
+            # Append the temporary GeoDataFrame to the main GeoDataFrame
+            crown_mask = pd.concat([crown_mask, gdf_temp], ignore_index=True)
+            crown_scores.append(scores)
+            crown_logits.append(logits)
 
     # Convert the DataFrame to a GeoDataFrame
     crown_mask = gpd.GeoDataFrame(crown_mask, geometry=crown_mask.geometry)
@@ -328,6 +268,8 @@ from shapely.geometry import box
 from shapely.geometry import box, Point, MultiPoint, Polygon
 import imageio
 import deepforest
+from PIL import Image
+from scipy.ndimage import zoom
 
 def transform_coordinates(geometry, x_offset, y_offset):
     if geometry.type == "Point":
@@ -339,16 +281,38 @@ def transform_coordinates(geometry, x_offset, y_offset):
     else:
         raise ValueError("Unsupported geometry type")
 
+import numpy as np
+from scipy.ndimage import zoom
 
-def split_image(image_file, itcs, bbox,  batch_size=40, resolution=0.1):
+def upscale_array(input_array, reference_array, input_resolution, reference_resolution):
+    # Calculate the ratio between the spatial resolutions
+    ratio = reference_resolution / input_resolution
+
+    # Use the zoom function to upscale the input_array
+    # Account for multi-dimensional arrays
+    zoom_factors = (ratio, ratio) + (1,) * (input_array.ndim - 2)
+    upscaled_array = zoom(input_array, zoom_factors, order=3)
+    
+    # In case the upscaled dimensions are slightly larger than the reference dimensions,
+    # truncate or pad the upscaled array to match the reference array's dimensions
+    shape_diff = tuple(s - r for s, r in zip(upscaled_array.shape, reference_array.shape))
+    upscaled_array = upscaled_array[tuple(slice(0, r) for r in reference_array.shape)]
+    
+    return upscaled_array
+
+def split_image(image_file, hsi_img, itcs, bbox,  batch_size=40):
     # Open the raster image
+
+
     with rasterio.open(image_file) as src:
         # Get the height and width of the image in pixels
         height, width = src.shape
         # Convert the batch size from meters to pixels
+        resolution =src.transform[0]
         batch_size_ = int(batch_size / resolution)
         # Initialize lists to store the raster batches and clipped GeoDataFrames
         raster_batches = []
+        hsi_batches = []
         itcs_batches = []
         affines = []
         itcs_boxes = []
@@ -361,11 +325,25 @@ def split_image(image_file, itcs, bbox,  batch_size=40, resolution=0.1):
                 batch = src.read(window=window)
                 # Append the raster batch to the list
                 raster_batches.append(batch)
-
+                 
                 # Convert the window to geospatial coordinates
                 left, top = src.xy(i, j)
                 right, bottom = src.xy(i+batch_size_, j+batch_size_)
                 batch_bounds = box(left, bottom, right, top)
+
+                #rasterio load hsi_img only within the bounds of batch_bounds
+                with rasterio.open(hsi_img) as hsi: 
+                    resolution_hsi = hsi.transform[0]
+                    #modify window to account for hsi resolution
+                    resolution_factor =  resolution_hsi /resolution 
+                    batch_size_hsi = round(batch_size_ / resolution_factor)
+                    window_hsi = Window(col_off=j, row_off=i, width=batch_size_hsi, height=batch_size_hsi)
+                    hsi_batch = hsi.read(window=window_hsi)
+
+                # upscale hsi_batch to the same size as batch
+                #hsi_batch_ = upscale_array(hsi_batch, batch, resolution_hsi, resolution)
+
+                hsi_batches.append(hsi_batch)
 
                 # Clip the GeoDataFrame using the batch bounds
                 itcs_clipped = gpd.clip(itcs, batch_bounds)
