@@ -286,18 +286,17 @@ from scipy.ndimage import zoom
 
 def upscale_array(input_array, reference_array, input_resolution, reference_resolution):
     # Calculate the ratio between the spatial resolutions
-    ratio = reference_resolution / input_resolution
+    ratio =  input_resolution /reference_resolution
 
-    # Use the zoom function to upscale the input_array
-    # Account for multi-dimensional arrays
-    zoom_factors = (ratio, ratio) + (1,) * (input_array.ndim - 2)
+    # Account for raster arrays with shape (bands, height, width)
+    zoom_factors = (1,) + (ratio, ratio)
     upscaled_array = zoom(input_array, zoom_factors, order=3)
-    
+
     # In case the upscaled dimensions are slightly larger than the reference dimensions,
     # truncate or pad the upscaled array to match the reference array's dimensions
     shape_diff = tuple(s - r for s, r in zip(upscaled_array.shape, reference_array.shape))
-    upscaled_array = upscaled_array[tuple(slice(0, r) for r in reference_array.shape)]
-    
+    upscaled_array = upscaled_array[:, :reference_array.shape[1], :reference_array.shape[2]]
+
     return upscaled_array
 
 def split_image(image_file, hsi_img, itcs, bbox,  batch_size=40):
@@ -337,11 +336,11 @@ def split_image(image_file, hsi_img, itcs, bbox,  batch_size=40):
                     #modify window to account for hsi resolution
                     resolution_factor =  resolution_hsi /resolution 
                     batch_size_hsi = round(batch_size_ / resolution_factor)
-                    window_hsi = Window(col_off=j, row_off=i, width=batch_size_hsi, height=batch_size_hsi)
+                    window_hsi = Window(col_off=j/resolution_factor, row_off=i/resolution_factor, width=batch_size_hsi, height=batch_size_hsi)
                     hsi_batch = hsi.read(window=window_hsi)
 
                 # upscale hsi_batch to the same size as batch
-                #hsi_batch_ = upscale_array(hsi_batch, batch, resolution_hsi, resolution)
+                hsi_batch = upscale_array(hsi_batch, batch, resolution_hsi, resolution)
 
                 hsi_batches.append(hsi_batch)
 
@@ -386,5 +385,5 @@ def split_image(image_file, hsi_img, itcs, bbox,  batch_size=40):
                 affines.append(src.window_transform(window))
                 itcs_boxes.append(tmp_bx)
     # Return the lists of raster batches and clipped GeoDataFrames
-    return raster_batches, itcs_batches, itcs_boxes, affines
+    return raster_batches, hsi_batches, itcs_batches, itcs_boxes, affines
 
